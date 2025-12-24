@@ -1,0 +1,34 @@
+name: Jira Ticket Enforcement
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  jira-enforcement:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check PR title, description, and branch for Jira ticket
+        run: |
+          PR_TITLE="${{ github.event.pull_request.title }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
+          PR_BRANCH="${{ github.event.pull_request.head.ref }}"
+
+          # Allowed Jira project keys
+          JIRA_PATTERN="(CYVD|PRD)-[0-9]+"
+
+          echo "PR title: $PR_TITLE"
+          echo "PR branch: $PR_BRANCH"
+
+          if echo "$PR_TITLE $PR_BODY $PR_BRANCH" | grep -qE "$JIRA_PATTERN"; then
+            TICKET=$(echo "$PR_TITLE $PR_BODY $PR_BRANCH" | grep -oE "$JIRA_PATTERN" | head -1)
+            echo "✅ Jira ticket found: $TICKET"
+          else
+            echo "❌ No Jira ticket reference found"
+            echo "Expected formats:"
+            echo "  - Branch: feature/CYVD-123-description"
+            echo "  - PR title: [CYVD-123] Short description"
+            echo "  - PR body: Fixes CYVD-123"
+            exit 1
+          fi
