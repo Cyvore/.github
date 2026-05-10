@@ -1,6 +1,0 @@
-{
-  "name": "Test Workflow",
-  "description": "Org-wide test workflow",
-  "iconName": "terminal",
-  "categories": ["CI"]
-}

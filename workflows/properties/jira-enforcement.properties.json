@@ -1,6 +1,0 @@
-{
-  "name": "Jira Ticket Enforcement",
-  "description": "Blocks PRs unless a valid Jira ticket (CYVD-123 / PRD-123) is referenced in the branch, title, or description.",
-  "iconName": "issue-closed",
-  "categories": ["Compliance", "Governance"]
-}
