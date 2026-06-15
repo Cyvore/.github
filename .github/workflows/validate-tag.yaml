@@ -6,41 +6,69 @@ on:
       tag:
         required: true
         type: string
+      repo_name:
+        required: true
+        type: string
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: true
+    outputs:
+      has_description:
+        description: "true if the tag has a release description, false otherwise"
+        value: ${{ jobs.validate.outputs.has_description }}
 
 jobs:
   validate:
     runs-on: ubuntu-latest
+    outputs:
+      has_description: ${{ steps.check.outputs.has_description }}
     steps:
       - name: Check release body exists
+        id: check
         uses: actions/github-script@v7
         with:
           script: |
             const tag = '${{ inputs.tag }}';
+            const owner = context.repo.owner;
             let body = '';
+            let fixUrl = '';
 
             try {
               const release = await github.rest.repos.getReleaseByTag({
-                owner: context.repo.owner,
+                owner,
                 repo: context.repo.repo,
                 tag,
               });
               body = (release.data.body || '').trim();
+              fixUrl = `https://github.com/${owner}/${context.repo.repo}/releases/tag/${tag}`;
             } catch (e) {
-              core.setFailed(
-                `❌ No GitHub Release found for tag "${tag}".\n` +
-                `Please create a GitHub Release with a description before this tag can be published.\n` +
-                `Go to: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/new?tag=${tag}`
-              );
+              fixUrl = `https://github.com/${owner}/${context.repo.repo}/releases/new?tag=${tag}`;
+            }
+
+            if (body) {
+              console.log(`✅ Release description found for ${tag} (${body.length} chars)`);
+              core.setOutput('has_description', 'true');
               return;
             }
 
-            if (!body) {
-              core.setFailed(
-                `❌ Tag "${tag}" has an empty release description.\n` +
-                `Please edit the release and add what changed in this version.\n` +
-                `Go to: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`
-              );
-              return;
-            }
+            core.setOutput('has_description', 'false');
 
-            console.log(`✅ Release description found for ${tag} (${body.length} chars)`);
+            const isNoRelease = fixUrl.includes('releases/new');
+            const message = isNoRelease
+              ? `⚠️ *${{ inputs.repo_name }} ${tag}* was pushed without a GitHub Release.\nNo Confluence page or Slack announcement will be published until a description is added.\n<${fixUrl}|👉 Create the release here>`
+              : `⚠️ *${{ inputs.repo_name }} ${tag}* was pushed with an empty release description.\nNo Confluence page or Slack announcement will be published until a description is added.\n<${fixUrl}|👉 Edit the release here>`;
+
+            const https = require('https');
+            const bodyStr = JSON.stringify({ blocks: [{ type: 'section', text: { type: 'mrkdwn', text: message } }] });
+            const webhookUrl = new URL('${{ secrets.SLACK_WEBHOOK_URL }}');
+
+            await new Promise((resolve, reject) => {
+              const req = https.request(
+                { hostname: webhookUrl.hostname, path: webhookUrl.pathname, method: 'POST',
+                  headers: { 'Content-Type': 'application/json', 'Content-Length': bodyStr.length } },
+                res => { res.on('data', () => {}); res.on('end', resolve); }
+              );
+              req.on('error', reject);
+              req.write(bodyStr);
+              req.end();
+            });
