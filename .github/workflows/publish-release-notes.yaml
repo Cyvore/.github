@@ -1,0 +1,185 @@
+name: Publish Release Notes
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch release body
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = context.ref.replace('refs/tags/', '');
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag,
+            });
+            const body = release.data.body || '';
+            const escaped = body
+              .replace(/%/g, '%25')
+              .replace(/\n/g, '%0A')
+              .replace(/\r/g, '%0D');
+            core.setOutput('body', escaped);
+            core.setOutput('tag', tag);
+
+      - name: Convert to Confluence HTML + extract Slack bullets
+        id: convert
+        run: |
+          python3 << 'PYEOF'
+          import os, re, json
+          from datetime import date
+
+          raw = os.environ["RELEASE_BODY"]
+          body = raw.replace('%0A', '\n').replace('%0D', '\r').replace('%25', '%')
+          tag  = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          today = date.today().strftime("%B %d, %Y")
+
+          lines = body.splitlines()
+          html_lines = []
+
+          for line in lines:
+            stripped = line.strip()
+            if re.match(r'^[A-Z][^:]+:\s*$', stripped):
+              html_lines.append(f"<h3>{stripped.rstrip(':')}</h3>")
+            elif stripped.startswith('- '):
+              content = stripped[2:]
+              content = re.sub(r'(CYVD-\d+(?:/\d+)*)', r'<strong>\1</strong>', content)
+              content = re.sub(r'`([^`]+)`', r'<code>\1</code>', content)
+              html_lines.append(f"<li>{content}</li>")
+            elif stripped == '':
+              html_lines.append('')
+            else:
+              content = re.sub(r'(CYVD-\d+(?:/\d+)*)', r'<strong>\1</strong>', line)
+              content = re.sub(r'`([^`]+)`', r'<code>\1</code>', content)
+              html_lines.append(f"<p>{content}</p>")
+
+          result = []
+          in_list = False
+          for line in html_lines:
+            if line.startswith('<li>'):
+              if not in_list:
+                result.append('<ul>')
+                in_list = True
+              result.append(line)
+            else:
+              if in_list:
+                result.append('</ul>')
+                in_list = False
+              result.append(line)
+          if in_list:
+            result.append('</ul>')
+
+          body_html = '\n'.join(result)
+          full_html = f"<h2>{repo} {tag} — {today}</h2>\n{body_html}\n<hr/>"
+
+          slack_bullets = []
+          for line in lines:
+            if line.strip().startswith('- ') and len(slack_bullets) < 3:
+              item = line.strip()[2:]
+              item = re.sub(r'\(CYVD-\d+(?:/\d+)*\):?\s*', '', item)
+              item = re.sub(r'CYVD-\d+(?:/\d+)*:?\s*', '', item)
+              item = item.replace('`', '').strip()
+              slack_bullets.append(item)
+
+          output = json.dumps({"html": full_html, "slack_bullets": slack_bullets})
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"payload<<EOF\n{output}\nEOF\n")
+          PYEOF
+        env:
+          RELEASE_BODY: ${{ steps.release.outputs.body }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REPO: ${{ github.event.repository.name }}
+
+      - name: Get current Confluence page
+        id: confluence_get
+        run: |
+          response=$(curl -sf \
+            -u "${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}" \
+            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}?expand=version,body.storage,space")
+
+          echo "version=$(echo $response | python3 -c "import sys,json; print(json.load(sys.stdin)['version']['number'])")" >> $GITHUB_OUTPUT
+          echo "title=$(echo $response | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")" >> $GITHUB_OUTPUT
+          echo "space=$(echo $response | python3 -c "import sys,json; print(json.load(sys.stdin)['space']['key'])")" >> $GITHUB_OUTPUT
+          echo "current_body=$(echo $response | python3 -c "import sys,json; print(json.load(sys.stdin)['body']['storage']['value'])")" >> $GITHUB_OUTPUT
+
+      - name: Prepend section to Confluence page
+        id: confluence_update
+        run: |
+          NEW_HTML=$(echo '${{ steps.convert.outputs.payload }}' | python3 -c "import sys,json; print(json.load(sys.stdin)['html'])")
+          CURRENT_BODY='${{ steps.confluence_get.outputs.current_body }}'
+          NEXT_VERSION=$(( ${{ steps.confluence_get.outputs.version }} + 1 ))
+          TITLE='${{ steps.confluence_get.outputs.title }}'
+          SPACE='${{ steps.confluence_get.outputs.space }}'
+
+          PAYLOAD=$(python3 -c "
+          import json, sys
+          body = sys.argv[1]
+          title = sys.argv[2]
+          version = int(sys.argv[3])
+          print(json.dumps({
+            'version': {'number': version},
+            'title': title,
+            'type': 'page',
+            'body': {'storage": {'value': body, 'representation': 'storage'}}
+          }))
+          " "${NEW_HTML}${CURRENT_BODY}" "$TITLE" "$NEXT_VERSION")
+
+          curl -sf -X PUT \
+            -u "${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "${{ secrets.CONFLUENCE_BASE_URL }}/wiki/rest/api/content/${{ secrets.CONFLUENCE_PAGE_ID }}"
+
+          echo "page_url=${{ secrets.CONFLUENCE_BASE_URL }}/wiki/spaces/${SPACE}/pages/${{ secrets.CONFLUENCE_PAGE_ID }}" >> $GITHUB_OUTPUT
+
+      - name: Post Slack announcement
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, os
+
+          payload_raw = os.environ["PAYLOAD"]
+          data = json.loads(payload_raw)
+          bullets = '\n'.join(f"• {b}" for b in data["slack_bullets"])
+          tag = os.environ["TAG"]
+          repo = os.environ["REPO"]
+          page_url = os.environ["PAGE_URL"]
+          webhook = os.environ["SLACK_RELEASE_WEBHOOK_URL"]
+
+          payload = {
+            "blocks": [
+              {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"🚀 New Release: {repo} {tag}"}
+              },
+              {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": bullets}
+              },
+              {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"<{page_url}|📄 Full release notes>"}
+              }
+            ]
+          }
+
+          req = urllib.request.Request(
+            webhook,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}
+          )
+          urllib.request.urlopen(req)
+          print("✅ Slack message sent")
+          PYEOF
+        env:
+          PAYLOAD: ${{ steps.convert.outputs.payload }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REPO: ${{ github.event.repository.name }}
+          PAGE_URL: ${{ steps.confluence_update.outputs.page_url }}
+          SLACK_RELEASE_WEBHOOK_URL: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
