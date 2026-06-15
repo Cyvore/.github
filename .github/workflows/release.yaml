@@ -7,7 +7,7 @@ on:
 
 jobs:
   validate:
-    uses: cyvore/.github/.github/workflows/validate-tag.yml@main
+    uses: cyvore/.github/.github/workflows/validate-tag.yaml@main
     with:
       tag: ${{ github.ref_name }}
       repo_name: ${{ github.event.repository.name }}
@@ -17,7 +17,7 @@ jobs:
   publish:
     needs: validate
     if: needs.validate.outputs.has_description == 'true'
-    uses: cyvore/.github/.github/workflows/publish-release-notes.yml@main
+    uses: cyvore/.github/.github/workflows/publish-release-notes.yaml@main
     with:
       tag: ${{ github.ref_name }}
       repo_name: ${{ github.event.repository.name }}
