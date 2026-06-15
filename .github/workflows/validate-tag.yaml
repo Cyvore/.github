@@ -1,0 +1,46 @@
+name: Validate Tag Description
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check release body exists
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = '${{ inputs.tag }}';
+            let body = '';
+
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              body = (release.data.body || '').trim();
+            } catch (e) {
+              core.setFailed(
+                `❌ No GitHub Release found for tag "${tag}".\n` +
+                `Please create a GitHub Release with a description before this tag can be published.\n` +
+                `Go to: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/new?tag=${tag}`
+              );
+              return;
+            }
+
+            if (!body) {
+              core.setFailed(
+                `❌ Tag "${tag}" has an empty release description.\n` +
+                `Please edit the release and add what changed in this version.\n` +
+                `Go to: https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`
+              );
+              return;
+            }
+
+            console.log(`✅ Release description found for ${tag} (${body.length} chars)`);
