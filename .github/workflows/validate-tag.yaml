@@ -10,7 +10,7 @@ on:
         required: true
         type: string
     secrets:
-      SLACK_WEBHOOK_URL:
+      SLACK_ALERTS_WEBHOOK_URL:
         required: true
     outputs:
       has_description:
@@ -60,7 +60,7 @@ jobs:
 
             const https = require('https');
             const bodyStr = JSON.stringify({ blocks: [{ type: 'section', text: { type: 'mrkdwn', text: message } }] });
-            const webhookUrl = new URL('${{ secrets.SLACK_WEBHOOK_URL }}');
+            const webhookUrl = new URL('${{ secrets.SLACK_ALERTS_WEBHOOK_URL }}');
 
             await new Promise((resolve, reject) => {
               const req = https.request(
