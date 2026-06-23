@@ -2,13 +2,8 @@ name: Sync Release Notes Caller
 
 on:
   schedule:
-    - cron: '0 6 * * *'  # daily at 06:00 UTC
+    - cron: "0 6 * * *"  # daily at 06:00 UTC
   workflow_dispatch:
-    inputs:
-      repo:
-        description: 'Specific repo to add caller to (leave empty for all repos)'
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -16,61 +11,15 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GH_ORG_PAT }}
     steps:
-      - name: Write caller file template
-        run: |
-          cat > /tmp/caller.yml << 'EOF'
-          name: Release Notes
-          on:
-            push:
-              tags: ['*']
-          jobs:
-            release-notes:
-              uses: cyvore/.github/.github/workflows/publish-release-notes.yaml@main
-              secrets: inherit
-          EOF
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Add release-notes caller to repos missing it
-        run: |
-          TARGET_REPO="${{ inputs.repo }}"
-          ADDED=0; SKIPPED=0; FAILED=0
-
-          if [ -n "$TARGET_REPO" ]; then
-            REPOS="$TARGET_REPO"
-          else
-            REPOS=$(gh repo list cyvore --limit 100 --json name,isArchived \
-              --jq '.[] | select(.isArchived == false) | .name')
-          fi
-
-          for repo in $REPOS; do
-            if [ "$repo" = ".github" ]; then
-              continue
-            fi
-
-            # Check if file already exists
-            if gh api "repos/cyvore/$repo/contents/.github/workflows/release-notes.yml" \
-                --silent 2>/dev/null; then
-              echo "SKIP  $repo — already has caller"
-              SKIPPED=$((SKIPPED + 1))
-              continue
-            fi
-
-            # Create the file
-            CONTENT=$(base64 -w0 /tmp/caller.yml)
-            if gh api "repos/cyvore/$repo/contents/.github/workflows/release-notes.yml" \
-                -X PUT \
-                -f message="ci: add release notes caller workflow" \
-                -f content="$CONTENT" \
-                --silent 2>/tmp/gh_err; then
-              echo "ADDED $repo"
-              ADDED=$((ADDED + 1))
-            else
-              echo "FAIL  $repo — $(cat /tmp/gh_err)"
-              FAILED=$((FAILED + 1))
-            fi
-          done
-
-          echo ""
-          echo "Done: $ADDED added, $SKIPPED skipped, $FAILED failed"
+      - name: Sync release-notes caller to org repos
+        uses: BetaHuhn/repo-file-sync-action@v1
+        env:
+          GH_PAT: ${{ secrets.GH_ORG_PAT }}
+          CONFIG_PATH: .github/sync.yml
+          SKIP_PR: true
+          COMMIT_PREFIX: "ci:"
+          COMMIT_BODY: "Adds release notes caller workflow — auto-synced from cyvore/.github"
