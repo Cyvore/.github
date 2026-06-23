@@ -1,0 +1,8 @@
+name: Release Notes
+on:
+  push:
+    tags: ["*"]
+jobs:
+  release-notes:
+    uses: cyvore/.github/.github/workflows/publish-release-notes.yaml@main
+    secrets: inherit
