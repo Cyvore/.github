@@ -1,0 +1,57 @@
+group:
+  repos: |
+    cyvore/Analyst-toolbox
+    cyvore/BackOffice
+    cyvore/BackOfficeOld
+    cyvore/CertificateFingerprinting
+    cyvore/CloudAssetsFingerprinting
+    cyvore/RiskAssesment
+    cyvore/ShragaWhatsapp
+    cyvore/Stalker
+    cyvore/TAIO
+    cyvore/TIAO
+    cyvore/Utils
+    cyvore/ai-gateway
+    cyvore/attendee-adapter
+    cyvore/cyvore-central-api
+    cyvore/cyvore-dan
+    cyvore/cyvore-db
+    cyvore/cyvore-engine
+    cyvore/cyvore-tools
+    cyvore/cyvore-ui
+    cyvore/cyvore-ui-api
+    cyvore/cyvore-website
+    cyvore/cyvoreos
+    cyvore/devops-test
+    cyvore/domain-tagger
+    cyvore/email-blocker
+    cyvore/engine-v2
+    cyvore/engine-v3
+    cyvore/face-vector-api
+    cyvore/fish-and-chips
+    cyvore/helm
+    cyvore/identity-engine
+    cyvore/integrations
+    cyvore/manifold
+    cyvore/mx-relay
+    cyvore/notification-center
+    cyvore/office-365-graph-integration
+    cyvore/platform
+    cyvore/platform-api
+    cyvore/poller
+    cyvore/purple-meet-portal
+    cyvore/purple-probe-planner
+    cyvore/risk-assessment-demo-dashboard
+    cyvore/scanmysms
+    cyvore/scanmysms-dash
+    cyvore/scanmysms-worker
+    cyvore/terraform-gcp
+    cyvore/text-based-phishing-detection
+    cyvore/vectors
+    cyvore/zoom-bot
+    cyvore/zoom-bot-manager
+    cyvore/zoom-bridge
+  files:
+    - source: workflow-templates/release-notes.yml
+      dest: .github/workflows/release-notes.yml
+      replace: false
