@@ -1,8 +1,13 @@
 name: Sync Release Notes Caller
 
 on:
-  schedule:
-    - cron: "0 6 * * *"  # daily at 06:00 UTC
+  # Schedule paused 2026-08-19. GH_ORG_PAT is expired, so every run since at least
+  # 6 August died at `git clone` with "could not read Password" — 14 consecutive
+  # red mornings reporting a problem nobody could act on from the failure alone.
+  # Re-enable once the PAT is replaced (classic, repo scope, SAML-authorised for
+  # the org), then dispatch once manually to confirm the sync actually lands.
+  # schedule:
+  #   - cron: "0 6 * * *"  # daily at 06:00 UTC
   workflow_dispatch:
 
 permissions:
