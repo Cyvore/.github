@@ -1,0 +1,62 @@
+name: Conventional Commit Title
+
+# The PR title IS the commit on main: every repo is squash-only with
+# squash_merge_commit_title=PR_TITLE. release-please reads that line to pick the
+# version, so a title it cannot parse produces no release and says nothing.
+#
+#   feat: ...  -> minor      fix: ... -> patch
+#   feat!: ... -> major      chore:/docs: -> no release
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title is a conventional commit
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          TYPES="feat|fix|chore|docs|refactor|test|perf|build|ci|revert|style"
+          PATTERN="^(${TYPES})(\([a-z0-9._/-]+\))?!?: .+"
+
+          echo "Checking PR title: $PR_TITLE"
+
+          # GitHub's own revert button produces: Revert "feat: ..."
+          if echo "$PR_TITLE" | grep -qE '^Revert ".+"$'; then
+            echo "✅ Revert PR — accepted as-is"
+            exit 0
+          fi
+
+          if ! echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "❌ PR title is not a conventional commit"
+            echo ""
+            echo "Format:  <type>: <description>"
+            echo "         <type>(<scope>): <description>"
+            echo "         <type>!: <description>      (breaking change)"
+            echo ""
+            echo "Types:   feat fix chore docs refactor test perf build ci revert style"
+            echo ""
+            echo "Your title: $PR_TITLE"
+            echo ""
+            echo "Examples:"
+            echo "  feat: add workspace filter (CYVD-2372)"
+            echo "  fix(kafka): handle empty topic list (CYVD-3101)"
+            echo "  feat!: drop support for v1 config (CYVD-2900)"
+            exit 1
+          fi
+
+          TYPE=$(echo "$PR_TITLE" | sed -E "s/^(${TYPES}).*/\1/")
+          case "$TYPE" in
+            feat) echo "✅ Valid — 'feat' bumps the MINOR version" ;;
+            fix)  echo "✅ Valid — 'fix' bumps the PATCH version" ;;
+            *)    echo "✅ Valid — '$TYPE' does not trigger a release" ;;
+          esac
+          echo "$PR_TITLE" | grep -q '!:' && echo "⚠️  '!' marks a BREAKING CHANGE — this bumps the MAJOR version"
+          exit 0
