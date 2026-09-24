@@ -23,7 +23,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          TYPES="feat|fix|chore|docs|refactor|test|perf|build|ci|revert|style"
+          TYPES="feat|fix|chore|docs|refactor|test|perf|build|ci|revert|style|release"
           PATTERN="^(${TYPES})(\([a-z0-9._/-]+\))?!?: .+"
 
           echo "Checking PR title: $PR_TITLE"
@@ -41,7 +41,7 @@ jobs:
             echo "         <type>(<scope>): <description>"
             echo "         <type>!: <description>      (breaking change)"
             echo ""
-            echo "Types:   feat fix chore docs refactor test perf build ci revert style"
+            echo "Types:   feat fix chore docs refactor test perf build ci revert style release"
             echo ""
             echo "Your title: $PR_TITLE"
             echo ""
