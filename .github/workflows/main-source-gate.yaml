@@ -1,0 +1,50 @@
+name: Main Source Branch
+
+# Repos that work on develop only take the sprint promotion, hotfixes, reverts and the
+# Release PR into main. Repos with no develop branch (helm, manifold) are not gated.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  main-source-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the source branch is allowed into main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          HEAD: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [ "$BASE" != "main" ]; then
+            echo "✅ Target is $BASE, not main — not gated"
+            exit 0
+          fi
+
+          if ! gh api "repos/$REPO/branches/develop" --silent 2>/dev/null; then
+            echo "✅ $REPO has no develop branch — every branch may target main"
+            exit 0
+          fi
+
+          case "$HEAD" in
+            develop|hotfix/*|revert-*|release-please--branches--*)
+              echo "✅ $HEAD -> main is allowed"
+              exit 0
+              ;;
+          esac
+
+          echo "❌ $HEAD cannot be merged into main"
+          echo ""
+          echo "main only accepts:"
+          echo "  develop                        sprint promotion"
+          echo "  hotfix/<CYVD-123>-<desc>       urgent fix (merge it back into develop after)"
+          echo "  revert-*                       GitHub's Revert button"
+          echo "  release-please--branches--*    the Release PR"
+          echo ""
+          echo "Change the PR's base branch to develop."
+          exit 1
