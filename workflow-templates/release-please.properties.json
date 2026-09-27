@@ -1,0 +1,6 @@
+{
+  "name": "Release Please (Cyvore)",
+  "description": "Release PRs, tags and Slack release notes via cyvore-release-bot. Also add release-please-config.json and .release-please-manifest.json.",
+  "iconName": "octicon tag",
+  "categories": ["Automation"]
+}

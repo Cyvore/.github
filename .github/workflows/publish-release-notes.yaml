@@ -2,6 +2,15 @@ name: Publish Release Notes
 
 on:
   workflow_call:
+    inputs:
+      tag:
+        description: Release tag. Required unless the caller was triggered by the tag push itself.
+        type: string
+        default: ""
+      confluence:
+        description: Also prepend the notes to the Confluence release-notes page.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,15 +22,38 @@ jobs:
       - name: Fetch tag description
         id: release
         uses: actions/github-script@v7
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         with:
           script: |
-            const tag = context.ref.replace('refs/tags/', '');
+            const tag = process.env.TAG_INPUT || context.ref.replace('refs/tags/', '');
             const { owner, repo } = context.repo;
 
-            const { data: ref } = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
             let body = '';
+            let releaseUrl = '';
 
-            if (ref.object.type === 'tag') {
+            // release-please creates the tag and the Release together; retry in case the push event wins the race.
+            for (let attempt = 0; attempt < 3 && !releaseUrl; attempt++) {
+              try {
+                const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+                releaseUrl = release.html_url;
+                body = (release.body || '')
+                  .split('\n')
+                  .filter(l => !l.startsWith('## '))
+                  .map(l => l.replace(/^### /, '').replace(/^\* /, '- '))
+                  .map(l => l.replace(/\s*\(\[[0-9a-f]{7,}\]\([^)]*\)\)/g, ''))
+                  .map(l => l.replace(/\(\[(#\d+)\]\([^)]*\)\)/g, '($1)'))
+                  .join('\n')
+                  .trim();
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                await new Promise(r => setTimeout(r, 5000));
+              }
+            }
+
+            const { data: ref } = await github.rest.git.getRef({ owner, repo, ref: `tags/${tag}` });
+
+            if (!body && ref.object.type === 'tag') {
               const { data: tagObj } = await github.rest.git.getTag({ owner, repo, tag_sha: ref.object.sha });
               body = tagObj.message.split('\n').slice(1).join('\n').trim();
             }
@@ -53,6 +85,7 @@ jobs:
               .replace(/\r/g, '%0D');
             core.setOutput('body', escaped);
             core.setOutput('tag', tag);
+            core.setOutput('release_url', releaseUrl || `https://github.com/${owner}/${repo}/releases/tag/${tag}`);
             core.setOutput('skip', 'false');
 
       - name: Convert to Confluence HTML + extract Slack bullets
@@ -112,6 +145,7 @@ jobs:
             stripped = line.strip()
             if stripped.startswith('- ') and len(slack_bullets) < 3:
               item = stripped[2:]
+              item = re.sub(r'\s*\(CYVD-\d+(?:/\d+)*\)', '', item)
               item = re.sub(r'CYVD-\d+(?:/\d+)*\s*(?:\([^)]+\))?\s*:?\s*', '', item)
               item = item.replace('`', '').strip()
               if item:
@@ -128,7 +162,7 @@ jobs:
 
       - name: Get current Confluence page
         id: confluence_get
-        if: steps.release.outputs.skip != 'true'
+        if: steps.release.outputs.skip != 'true' && inputs.confluence
         run: |
           response=$(curl -sf \
             -u "${{ secrets.CONFLUENCE_EMAIL }}:${{ secrets.CONFLUENCE_API_TOKEN }}" \
@@ -141,7 +175,7 @@ jobs:
 
       - name: Prepend section to Confluence page
         id: confluence_update
-        if: steps.release.outputs.skip != 'true'
+        if: steps.release.outputs.skip != 'true' && inputs.confluence
         env:
           CONFLUENCE_EMAIL: ${{ secrets.CONFLUENCE_EMAIL }}
           CONFLUENCE_API_TOKEN: ${{ secrets.CONFLUENCE_API_TOKEN }}
@@ -200,7 +234,7 @@ jobs:
           PAYLOAD: ${{ steps.convert.outputs.payload }}
           TAG: ${{ steps.release.outputs.tag }}
           REPO: ${{ github.event.repository.name }}
-          PAGE_URL: ${{ steps.confluence_update.outputs.page_url }}
+          PAGE_URL: ${{ steps.confluence_update.outputs.page_url || steps.release.outputs.release_url }}
           SLACK_RELEASE_WEBHOOK_URL: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
         run: |
           python3 << 'PYEOF'
