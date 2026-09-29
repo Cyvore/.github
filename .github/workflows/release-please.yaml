@@ -36,6 +36,14 @@ jobs:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
 
+      # release-please names it "v<version>" even with include-v-in-tag: false.
+      - name: Name the release after its tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG"
+
   release-notes:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
