@@ -20,8 +20,7 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+      tags: ${{ steps.tags.outputs.list }}
     steps:
       - uses: actions/create-github-app-token@v2
         id: app-token
@@ -36,53 +35,70 @@ jobs:
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
 
+      # One tag for a single-package repo, one per released chart in helm.
+      - name: List the tags this run created
+        id: tags
+        env:
+          OUTPUTS: ${{ toJSON(steps.release.outputs) }}
+        run: |
+          list=$(echo "$OUTPUTS" | jq -c '[to_entries[]
+            | select(.key == "tag_name" or (.key | endswith("--tag_name")))
+            | .value | select(. != "")] | unique')
+          echo "Released: $list"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
       # Replaces release-please's "v<version>" name. Falls back to the first feat/fix line,
       # then the bare tag, so a missing key or API error never blocks a release.
-      - name: Give the release a real title
-        if: steps.release.outputs.release_created == 'true'
+      - name: Give each release a real title
+        if: steps.tags.outputs.list != '[]'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TAG: ${{ steps.release.outputs.tag_name }}
+          TAGS: ${{ steps.tags.outputs.list }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          notes=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
-          summary=""
+          for TAG in $(echo "$TAGS" | jq -r '.[]'); do
+            notes=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+            summary=""
 
-          if [ -n "$ANTHROPIC_API_KEY" ]; then
-            payload=$(jq -n --arg notes "$notes" '{
-              model: "claude-opus-5",
-              max_tokens: 2000,
-              fallbacks: "default",
-              output_config: {effort: "low"},
-              messages: [{role: "user", content: ("Write a title for this software release: at most 8 words, naming its main themes. No version number, no quotes, no trailing period. Reply with the title only.\n\n" + $notes)}]
-            }')
-            resp=$(curl -sS --max-time 60 https://api.anthropic.com/v1/messages \
-              -H "content-type: application/json" \
-              -H "x-api-key: $ANTHROPIC_API_KEY" \
-              -H "anthropic-version: 2023-06-01" \
-              -H "anthropic-beta: server-side-fallback-2026-07-01" \
-              -d "$payload") || resp=""
-            if [ "$(echo "$resp" | jq -r '.stop_reason // empty' 2>/dev/null)" = "end_turn" ]; then
-              summary=$(echo "$resp" | jq -r '[.content[] | select(.type == "text") | .text] | join(" ")' \
-                | tr '\n' ' ' | sed -E 's/^[ "]+//; s/[ ".]+$//' | cut -c1-80)
-            else
-              echo "::warning::Claude title failed, using fallback: $(echo "$resp" | jq -c '.error // .stop_reason' 2>/dev/null)"
+            if [ -n "$ANTHROPIC_API_KEY" ]; then
+              payload=$(jq -n --arg notes "$notes" '{
+                model: "claude-opus-5",
+                max_tokens: 2000,
+                fallbacks: "default",
+                output_config: {effort: "low"},
+                messages: [{role: "user", content: ("Write a title for this software release: at most 8 words, naming its main themes. No version number, no quotes, no trailing period. Reply with the title only.\n\n" + $notes)}]
+              }')
+              resp=$(curl -sS --max-time 60 https://api.anthropic.com/v1/messages \
+                -H "content-type: application/json" \
+                -H "x-api-key: $ANTHROPIC_API_KEY" \
+                -H "anthropic-version: 2023-06-01" \
+                -H "anthropic-beta: server-side-fallback-2026-07-01" \
+                -d "$payload") || resp=""
+              if [ "$(echo "$resp" | jq -r '.stop_reason // empty' 2>/dev/null)" = "end_turn" ]; then
+                summary=$(echo "$resp" | jq -r '[.content[] | select(.type == "text") | .text] | join(" ")' \
+                  | tr '\n' ' ' | sed -E 's/^[ "]+//; s/[ ".]+$//' | cut -c1-80)
+              else
+                echo "::warning::Claude title failed, using fallback: $(echo "$resp" | jq -c '.error // .stop_reason' 2>/dev/null)"
+              fi
             fi
-          fi
 
-          if [ -z "$summary" ]; then
-            summary=$(echo "$notes" | grep -m1 -E '^\* ' | sed -E 's/^\* (\*\*[^*]+\*\* )?//; s/ \(\[.*$//' | cut -c1-80)
-          fi
+            if [ -z "$summary" ]; then
+              summary=$(echo "$notes" | grep -m1 -E '^\* ' | sed -E 's/^\* (\*\*[^*]+\*\* )?//; s/ \(\[.*$//' | cut -c1-80)
+            fi
 
-          title="$TAG"
-          [ -n "$summary" ] && title="$TAG — $summary"
-          echo "Release title: $title"
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title"
+            title="$TAG"
+            [ -n "$summary" ] && title="$TAG — $summary"
+            echo "Release title: $title"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title"
+          done
 
   release-notes:
     needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    if: needs.release-please.outputs.tags != '[]' && needs.release-please.outputs.tags != ''
+    strategy:
+      matrix:
+        tag: ${{ fromJSON(needs.release-please.outputs.tags) }}
     uses: Cyvore/.github/.github/workflows/publish-release-notes.yaml@main
     with:
-      tag: ${{ needs.release-please.outputs.tag_name }}
+      tag: ${{ matrix.tag }}
     secrets: inherit
