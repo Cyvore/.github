@@ -31,12 +31,14 @@ jobs:
 
             let body = '';
             let releaseUrl = '';
+            let releaseName = '';
 
             // release-please creates the tag and the Release together; retry in case the push event wins the race.
             for (let attempt = 0; attempt < 3 && !releaseUrl; attempt++) {
               try {
                 const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
                 releaseUrl = release.html_url;
+                releaseName = release.name || '';
                 body = (release.body || '')
                   .split('\n')
                   .filter(l => !l.startsWith('## '))
@@ -85,6 +87,7 @@ jobs:
               .replace(/\r/g, '%0D');
             core.setOutput('body', escaped);
             core.setOutput('tag', tag);
+            core.setOutput('name', releaseName || tag);
             core.setOutput('release_url', releaseUrl || `https://github.com/${owner}/${repo}/releases/tag/${tag}`);
             core.setOutput('skip', 'false');
 
@@ -147,11 +150,22 @@ jobs:
               item = stripped[2:]
               item = re.sub(r'\s*\(CYVD-\d+(?:/\d+)*\)', '', item)
               item = re.sub(r'CYVD-\d+(?:/\d+)*\s*(?:\([^)]+\))?\s*:?\s*', '', item)
+              item = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', item)
               item = item.replace('`', '').strip()
               if item:
                 slack_bullets.append(item)
 
-          output = json.dumps({"html": full_html, "slack_bullets": slack_bullets})
+          counts, section = {}, ""
+          for line in lines:
+            s = line.strip()
+            if s and not s.startswith('- '):
+              section = s
+            elif s.startswith('- ') and section in ("Features", "Bug Fixes"):
+              counts[section] = counts.get(section, 0) + 1
+          f, b = counts.get("Features", 0), counts.get("Bug Fixes", 0)
+          summary_line = " · ".join(x for x in [f"{f} feature{'s' if f != 1 else ''}" if f else "", f"{b} fix{'es' if b != 1 else ''}" if b else ""] if x)
+
+          output = json.dumps({"html": full_html, "slack_bullets": slack_bullets, "counts": summary_line})
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"payload<<EOF\n{output}\nEOF\n")
           PYEOF
@@ -159,6 +173,39 @@ jobs:
           RELEASE_BODY: ${{ steps.release.outputs.body }}
           TAG: ${{ steps.release.outputs.tag }}
           REPO: ${{ github.event.repository.name }}
+
+      # Falls back to the first changelog entries when there's no key or the call fails.
+      - name: Summarise for Slack
+        id: summary
+        if: steps.release.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RELEASE_BODY: ${{ steps.release.outputs.body }}
+        run: |
+          bullets="[]"
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            notes=$(printf '%s' "$RELEASE_BODY" | sed 's/%0A/\n/g; s/%0D//g; s/%25/%/g')
+            payload=$(jq -n --arg notes "$notes" '{
+              model: "claude-opus-5",
+              max_tokens: 2000,
+              fallbacks: "default",
+              output_config: {effort: "low"},
+              messages: [{role: "user", content: ("Summarise this software release for a team Slack channel as at most 3 bullet points, each under 15 words, covering the most important changes. Plain language, no ticket numbers, no markdown. One bullet per line starting with \"- \". Reply with the bullets only.\n\n" + $notes)}]
+            }')
+            resp=$(curl -sS --max-time 60 https://api.anthropic.com/v1/messages \
+              -H "content-type: application/json" \
+              -H "x-api-key: $ANTHROPIC_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "anthropic-beta: server-side-fallback-2026-07-01" \
+              -d "$payload") || resp=""
+            if [ "$(echo "$resp" | jq -r '.stop_reason // empty' 2>/dev/null)" = "end_turn" ]; then
+              bullets=$(echo "$resp" | jq -c '[.content[] | select(.type == "text") | .text] | join("\n")
+                | split("\n") | map(select(startswith("- ")) | ltrimstr("- ")) | .[0:3]')
+            else
+              echo "::warning::Claude summary failed, using changelog lines: $(echo "$resp" | jq -c '.error // .stop_reason' 2>/dev/null)"
+            fi
+          fi
+          echo "bullets=$bullets" >> "$GITHUB_OUTPUT"
 
       - name: Get current Confluence page
         id: confluence_get
@@ -232,6 +279,8 @@ jobs:
         if: steps.release.outputs.skip != 'true'
         env:
           PAYLOAD: ${{ steps.convert.outputs.payload }}
+          AI_BULLETS: ${{ steps.summary.outputs.bullets }}
+          NAME: ${{ steps.release.outputs.name }}
           TAG: ${{ steps.release.outputs.tag }}
           REPO: ${{ github.event.repository.name }}
           PAGE_URL: ${{ steps.confluence_update.outputs.page_url || steps.release.outputs.release_url }}
@@ -241,8 +290,9 @@ jobs:
           import json, urllib.request, os
 
           data = json.loads(os.environ["PAYLOAD"])
-          bullets = '\n'.join(f"• {b}" for b in data["slack_bullets"])
-          tag = os.environ["TAG"]
+          items = json.loads(os.environ.get("AI_BULLETS") or "[]") or data["slack_bullets"]
+          bullets = '\n'.join(f"• {b}" for b in items)
+          name = os.environ["NAME"] or os.environ["TAG"]
           repo = os.environ["REPO"]
           page_url = os.environ["PAGE_URL"]
           webhook = os.environ["SLACK_RELEASE_WEBHOOK_URL"]
@@ -250,9 +300,11 @@ jobs:
           blocks = [
             {
               "type": "header",
-              "text": {"type": "plain_text", "text": f"New Release: {repo} {tag}"}
+              "text": {"type": "plain_text", "text": f"{repo} {name}"[:150]}
             }
           ]
+          if data.get("counts"):
+            blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": data["counts"]}]})
           if bullets:
             blocks.append({
               "type": "section",
