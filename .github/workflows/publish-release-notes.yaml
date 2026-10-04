@@ -148,6 +148,8 @@ jobs:
             stripped = line.strip()
             if stripped.startswith('- ') and len(slack_bullets) < 3:
               item = stripped[2:]
+              # A ticket used as the commit scope renders as **CYVD-123:** — drop it whole, bold and all.
+              item = re.sub(r'\*\*CYVD-\d+(?:/\d+)*:?\*\*:?\s*', '', item)
               item = re.sub(r'\s*\(CYVD-\d+(?:/\d+)*\)', '', item)
               item = re.sub(r'CYVD-\d+(?:/\d+)*\s*(?:\([^)]+\))?\s*:?\s*', '', item)
               item = re.sub(r'\*\*([^*]+)\*\*', r'*\1*', item)
@@ -291,6 +293,8 @@ jobs:
 
           data = json.loads(os.environ["PAYLOAD"])
           items = json.loads(os.environ.get("AI_BULLETS") or "[]") or data["slack_bullets"]
+          # The fallback title is the first changelog line; don't repeat it as a bullet.
+          items = [i for i in items if i.replace("*", "") not in (os.environ["NAME"] or "")]
           bullets = '\n'.join(f"• {b}" for b in items)
           name = os.environ["NAME"] or os.environ["TAG"]
           repo = os.environ["REPO"]
