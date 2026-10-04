@@ -12,6 +12,14 @@ on:
       manifest-file:
         type: string
         default: .release-please-manifest.json
+      manual-bump:
+        description: A person picks the version via Run workflow; pushes never open a Release PR.
+        type: boolean
+        default: false
+      bump:
+        description: patch, minor or major. Set only by a Run workflow dispatch.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -30,10 +38,46 @@ jobs:
 
       - uses: googleapis/release-please-action@v4
         id: release
+        if: inputs.bump == ''
         with:
           token: ${{ steps.app-token.outputs.token }}
           config-file: ${{ inputs.config-file }}
           manifest-file: ${{ inputs.manifest-file }}
+          # Manual repos still tag when their Release PR merges; they just never get one opened for them.
+          skip-github-pull-request: ${{ inputs.manual-bump }}
+
+      # Run workflow with a bump: open the Release PR at the version a person chose.
+      - name: Open the Release PR at the chosen version
+        if: inputs.bump != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BUMP: ${{ inputs.bump }}
+          CONFIG: ${{ inputs.config-file }}
+          MANIFEST: ${{ inputs.manifest-file }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this from main, not ${GITHUB_REF#refs/heads/}"; exit 1; }
+
+          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/$MANIFEST?ref=main" --jq .content | base64 -d | jq -r '.["."] // empty')
+          [ -n "$current" ] || { echo "::error::Manual bump supports single-package repos (no \".\" in $MANIFEST)"; exit 1; }
+          next=$(python3 -c '
+          import sys
+          major, minor, patch = (int(x) for x in sys.argv[1].split("-")[0].split("."))
+          print({"major": f"{major+1}.0.0", "minor": f"{major}.{minor+1}.0", "patch": f"{major}.{minor}.{patch+1}"}[sys.argv[2]])
+          ' "$current" "$BUMP")
+          echo "Current $current, $BUMP -> $next"
+
+          out=$(npx -y release-please@17 release-pr \
+            --token="$GH_TOKEN" --repo-url="$GITHUB_REPOSITORY" --target-branch=main \
+            --config-file="$CONFIG" --manifest-file="$MANIFEST" --release-as="$next" 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+
+          if echo "$out" | grep -q "No user facing commits"; then
+            echo "::error::Nothing to release: no fix:/feat: commits on main since $current."
+            exit 1
+          fi
+          pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head release-please--branches--main --json url --jq '.[0].url')
+          echo "### Release PR for $next: $pr" >> "$GITHUB_STEP_SUMMARY"
 
       # One tag for a single-package repo, one per released chart in helm.
       - name: List the tags this run created
