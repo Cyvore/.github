@@ -58,13 +58,21 @@ jobs:
           set -euo pipefail
           [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this from main, not ${GITHUB_REF#refs/heads/}"; exit 1; }
 
-          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/$MANIFEST?ref=main" --jq .content | base64 -d | jq -r '.["."] // empty')
-          [ -n "$current" ] || { echo "::error::Manual bump supports single-package repos (no \".\" in $MANIFEST)"; exit 1; }
-          next=$(python3 -c '
+          read_file() { gh api "repos/$GITHUB_REPOSITORY/contents/$1?ref=main" --jq .content | base64 -d; }
+          read_file "$CONFIG" | jq -e '.packages | has(".")' >/dev/null \
+            || { echo "::error::Manual bump supports single-package repos (no \".\" package in $CONFIG)"; exit 1; }
+          current=$(read_file "$MANIFEST" | jq -r '.["."] // empty')
+          if [ -n "$current" ]; then
+            next=$(python3 -c '
           import sys
           major, minor, patch = (int(x) for x in sys.argv[1].split("-")[0].split("."))
           print({"major": f"{major+1}.0.0", "minor": f"{major}.{minor+1}.0", "patch": f"{major}.{minor}.{patch+1}"}[sys.argv[2]])
           ' "$current" "$BUMP")
+          else
+            # Never released: the manifest is {} and the first version is the config's initial-version.
+            next=$(read_file "$CONFIG" | jq -r '.["initial-version"] // "0.1.0"')
+            current="none"
+          fi
           echo "Current $current, $BUMP -> $next"
 
           out=$(npx -y release-please@17 release-pr \
