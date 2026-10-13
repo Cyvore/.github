@@ -1,0 +1,84 @@
+name: Dev deploy PR
+
+# Opens a helm PR pointing one image tag in v3/envs/dev.yaml at a freshly built dev image,
+# and asks whoever started the run to review it. A person merges, then Syncs in Argo.
+# Called by release-please.yaml (Run workflow from develop) and by repos with their own dev build.
+
+on:
+  workflow_call:
+    inputs:
+      key:
+        description: Image tag key under tags in v3/envs/dev.yaml, e.g. pipeliner or attendeeAdapter.
+        type: string
+        required: true
+      tag:
+        description: The dev image tag that was just built, e.g. 0.2.1-dev.
+        type: string
+        required: true
+    outputs:
+      url:
+        value: ${{ jobs.open-pr.outputs.url }}
+
+permissions:
+  contents: read
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-latest
+    outputs:
+      url: ${{ steps.pr.outputs.url }}
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: helm-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: Cyvore
+          repositories: helm
+
+      - name: Open the dev deploy PR in helm
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.helm-token.outputs.token }}
+          SOURCE_TOKEN: ${{ github.token }}
+          KEY: ${{ inputs.key }}
+          TAG: ${{ inputs.tag }}
+          FILE: v3/envs/dev.yaml
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY#*/}"
+          # The helm Jira check needs a key: take the one on the commit being deployed.
+          ticket=$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" --jq .commit.message 2>/dev/null \
+            | grep -oE 'CYVD-[0-9]+' | head -1 || true)
+          ticket="${ticket:-CYVD-3327}"
+
+          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
+          old=$(echo "$cur" | jq -r .content | base64 -d)
+          echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
+          prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
+          new=$(echo "$old" | sed -E "s|^(  ${KEY}: )\"[^\"]*\"|\1\"${TAG}\"|")
+
+          branch="dev-deploy/${repo}-${TAG}"
+          gh api -X POST repos/Cyvore/helm/git/refs -f ref="refs/heads/$branch" \
+            -f sha="$(gh api repos/Cyvore/helm/git/ref/heads/main --jq .object.sha)" --silent
+          gh api -X PUT "repos/Cyvore/helm/contents/$FILE" -f branch="$branch" -f sha="$(echo "$cur" | jq -r .sha)" \
+            -f message="chore(dev): deploy ${repo} ${TAG} (${ticket})" -f content="$(printf '%s\n' "$new" | base64 -w0)" --silent
+          url=$(gh pr create --repo Cyvore/helm --base main --head "$branch" \
+            --title "chore(dev): deploy ${repo} ${TAG} (${ticket})" \
+            --body "Dev deploy from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}, started by @${GITHUB_ACTOR}.
+
+          \`tags.${KEY}\` in \`${FILE}\`: \`${prev}\` → \`${TAG}\`
+
+          Approve + merge, then **Sync the dev app in Argo** (no auto-sync).
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+          # Whoever started the run gets GitHub's review notification (bell + email) with the link.
+          gh pr edit "$url" --add-reviewer "$GITHUB_ACTOR" >/dev/null \
+            || echo "::warning::Couldn't request a review from @$GITHUB_ACTOR; the link is in this summary."
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Dev build ${TAG} is ready"
+            echo "1. Approve + merge: ${url}"
+            echo "2. Sync the dev app in Argo"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Deploy PR: $url"
