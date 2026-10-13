@@ -46,8 +46,9 @@ jobs:
           # Manual repos still tag when their Release PR merges; they just never get one opened for them.
           skip-github-pull-request: ${{ inputs.manual-bump }}
 
-      # Run workflow with a bump: open the Release PR at the version a person chose.
-      - name: Open the Release PR at the chosen version
+      # Run workflow with a bump: from main a Release PR, from develop a dev build for v3/envs/dev.yaml.
+      - name: Work out the version
+        id: version
         if: inputs.bump != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -56,28 +57,151 @@ jobs:
           MANIFEST: ${{ inputs.manifest-file }}
         run: |
           set -euo pipefail
-          [ "$GITHUB_REF" = "refs/heads/main" ] || { echo "::error::Run this from main, not ${GITHUB_REF#refs/heads/}"; exit 1; }
+          case "$GITHUB_REF" in
+            refs/heads/main|refs/heads/develop) ;;
+            *) echo "::error::Run this from main (release) or develop (dev build), not ${GITHUB_REF#refs/heads/}"; exit 1 ;;
+          esac
 
-          current=$(gh api "repos/$GITHUB_REPOSITORY/contents/$MANIFEST?ref=main" --jq .content | base64 -d | jq -r '.["."] // empty')
-          [ -n "$current" ] || { echo "::error::Manual bump supports single-package repos (no \".\" in $MANIFEST)"; exit 1; }
-          next=$(python3 -c '
+          read_file() { gh api "repos/$GITHUB_REPOSITORY/contents/$1?ref=main" --jq .content | base64 -d; }
+          read_file "$CONFIG" | jq -e '.packages | has(".")' >/dev/null \
+            || { echo "::error::Manual bump supports single-package repos (no \".\" package in $CONFIG)"; exit 1; }
+          current=$(read_file "$MANIFEST" | jq -r '.["."] // empty')
+          if [ -n "$current" ]; then
+            next=$(python3 -c '
           import sys
           major, minor, patch = (int(x) for x in sys.argv[1].split("-")[0].split("."))
           print({"major": f"{major+1}.0.0", "minor": f"{major}.{minor+1}.0", "patch": f"{major}.{minor}.{patch+1}"}[sys.argv[2]])
           ' "$current" "$BUMP")
+          else
+            # Never released: the manifest is {} and the first version is the config's initial-version.
+            next=$(read_file "$CONFIG" | jq -r '.["initial-version"] // "0.1.0"')
+            current="none"
+          fi
           echo "Current $current, $BUMP -> $next"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
 
+      - name: Open the Release PR at the chosen version
+        if: inputs.bump != '' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CONFIG: ${{ inputs.config-file }}
+          MANIFEST: ${{ inputs.manifest-file }}
+          CURRENT: ${{ steps.version.outputs.current }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
           out=$(npx -y release-please@17 release-pr \
             --token="$GH_TOKEN" --repo-url="$GITHUB_REPOSITORY" --target-branch=main \
-            --config-file="$CONFIG" --manifest-file="$MANIFEST" --release-as="$next" 2>&1) || { echo "$out"; exit 1; }
+            --config-file="$CONFIG" --manifest-file="$MANIFEST" --release-as="$NEXT" 2>&1) || { echo "$out"; exit 1; }
           echo "$out"
 
           if echo "$out" | grep -q "No user facing commits"; then
-            echo "::error::Nothing to release: no fix:/feat: commits on main since $current."
+            echo "::error::Nothing to release: no fix:/feat: commits on main since $CURRENT."
             exit 1
           fi
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head release-please--branches--main --json url --jq '.[0].url')
-          echo "### Release PR for $next: $pr" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Release PR for $NEXT: $pr" >> "$GITHUB_STEP_SUMMARY"
+
+      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed has nothing on dev.
+      - name: Check this repo runs on dev
+        id: dev
+        if: inputs.bump != '' && github.ref == 'refs/heads/develop'
+        env:
+          DEV_KEYS: '{"pipeliner": "pipeliner", "manifold": "manifold", "cyvore-agents": "cyvoreAgents", "attendee": "attendee", "attendee-adapter": "attendeeAdapter"}'
+        run: |
+          set -euo pipefail
+          key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
+          [ -n "$key" ] || { echo "::error::${GITHUB_REPOSITORY#*/} doesn't run on dev (no tag in helm v3/envs/dev.yaml), so there is nothing to deploy. Run from main to release."; exit 1; }
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: Tag the dev build
+        id: devtag
+        if: steps.dev.outputs.key != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          # 0.2.1-dev, then 0.2.1-dev.2, .3 ... when that version is built for dev again.
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/${NEXT}-dev" --jq '.[].ref' | sed 's|refs/tags/||')
+          tag="${NEXT}-dev"; n=1
+          while echo "$existing" | grep -qx "$tag"; do n=$((n+1)); tag="${NEXT}-dev.${n}"; done
+          # Created as the bot so the tag push fires the repo's existing *-dev* image build.
+          gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Tagged $tag on develop @ ${GITHUB_SHA::7}"
+
+      - name: Wait for the dev image
+        if: steps.dev.outputs.key != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.devtag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            # Prod builds also fire on every tag; wait for the dev one only.
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --event push --branch "$TAG" --json databaseId,workflowName \
+              --jq '[.[] | select(.workflowName | test("dev"; "i"))][0].databaseId // empty')
+            [ -n "$id" ] && break
+            sleep 10
+          done
+          [ -n "$id" ] || { echo "::error::No image build started for $TAG (does this repo have a *-dev* tag build workflow?)"; exit 1; }
+          gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30 >/dev/null \
+            || { echo "::error::Dev image build for $TAG failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"; exit 1; }
+
+      - uses: actions/create-github-app-token@v2
+        id: helm-token
+        if: steps.dev.outputs.key != ''
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: Cyvore
+          repositories: helm
+
+      - name: Open the dev deploy PR in helm
+        if: steps.dev.outputs.key != ''
+        env:
+          GH_TOKEN: ${{ steps.helm-token.outputs.token }}
+          KEY: ${{ steps.dev.outputs.key }}
+          TAG: ${{ steps.devtag.outputs.tag }}
+          FILE: v3/envs/dev.yaml
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY#*/}"
+          # The helm Jira check needs a key: take the one on the develop commit being deployed.
+          ticket=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" | jq -r '.commit.message' | grep -oE 'CYVD-[0-9]+' | head -1 || true)
+          ticket="${ticket:-CYVD-3327}"
+
+          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
+          old=$(echo "$cur" | jq -r .content | base64 -d)
+          echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
+          new=$(echo "$old" | sed -E "s|^(  ${KEY}: )\"[^\"]*\"|\1\"${TAG}\"|")
+          prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
+
+          branch="dev-deploy/${repo}-${TAG}"
+          gh api -X POST repos/Cyvore/helm/git/refs -f ref="refs/heads/$branch" \
+            -f sha="$(gh api repos/Cyvore/helm/git/ref/heads/main --jq .object.sha)" --silent
+          gh api -X PUT "repos/Cyvore/helm/contents/$FILE" -f branch="$branch" -f sha="$(echo "$cur" | jq -r .sha)" \
+            -f message="chore(dev): deploy ${repo} ${TAG} (${ticket})" -f content="$(printf '%s\n' "$new" | base64 -w0)" --silent
+          url=$(gh pr create --repo Cyvore/helm --base main --head "$branch" \
+            --title "chore(dev): deploy ${repo} ${TAG} (${ticket})" \
+            --body "Dev deploy from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}, started by @${GITHUB_ACTOR}.
+
+          \`tags.${KEY}\` in \`${FILE}\`: \`${prev}\` → \`${TAG}\`
+
+          Approve + merge, then **Sync the dev app in Argo** (no auto-sync).
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+          # Whoever pressed Run workflow gets GitHub's review notification (bell + email) with the link.
+          gh pr edit "$url" --add-reviewer "$GITHUB_ACTOR" >/dev/null \
+            || echo "::warning::Couldn't request a review from @$GITHUB_ACTOR; the link is in this summary."
+          {
+            echo "### Dev build ${TAG} is ready"
+            echo "1. Approve + merge: ${url}"
+            echo "2. Sync the dev app in Argo"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::Deploy PR: $url"
 
       # One tag for a single-package repo, one per released chart in helm.
       - name: List the tags this run created
