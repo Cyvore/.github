@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.tags.outputs.list }}
+      dev-key: ${{ steps.dev.outputs.key }}
+      dev-tag: ${{ steps.devtag.outputs.tag }}
     steps:
       - uses: actions/create-github-app-token@v2
         id: app-token
@@ -117,7 +119,8 @@ jobs:
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head release-please--branches--main --json url --jq '.[0].url')
           echo "### Release PR for $NEXT: $pr" >> "$GITHUB_STEP_SUMMARY"
 
-      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed has nothing on dev.
+      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed still gets its dev
+      # image built; there's just no deploy PR.
       - name: Check this repo runs on dev
         id: dev
         if: steps.version.outputs.mode == 'dev'
@@ -126,12 +129,12 @@ jobs:
         run: |
           set -euo pipefail
           key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
-          [ -n "$key" ] || { echo "::error::${GITHUB_REPOSITORY#*/} doesn't run on dev (no tag in helm v3/envs/dev.yaml), so a dev build has nowhere to deploy. Pick What: release to make a real release, or add the repo to v3/envs/dev.yaml first."; exit 1; }
+          [ -n "$key" ] || echo "::notice::${GITHUB_REPOSITORY#*/} isn't on dev (no tag in helm v3/envs/dev.yaml): building the dev image only, no deploy PR."
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Tag the dev build
         id: devtag
-        if: steps.dev.outputs.key != ''
+        if: steps.version.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NEXT: ${{ steps.version.outputs.next }}
@@ -147,75 +150,26 @@ jobs:
           echo "Tagged $tag on ${GITHUB_REF#refs/heads/} @ ${GITHUB_SHA::7}"
 
       - name: Wait for the dev image
-        if: steps.dev.outputs.key != ''
+        if: steps.version.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.devtag.outputs.tag }}
+          KEY: ${{ steps.dev.outputs.key }}
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
             # Prod builds also fire on every tag; wait for the dev one only.
-            id=$(gh run list --repo "$GITHUB_REPOSITORY" --event push --branch "$TAG" --json databaseId,workflowName \
-              --jq '[.[] | select(.workflowName | test("dev"; "i"))][0].databaseId // empty')
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --event push --branch "$TAG" --json databaseId,workflowName,displayTitle \
+              --jq '[.[] | select((.workflowName + " " + .displayTitle) | test("\\bdev\\b"; "i") and (test("prod"; "i") | not))][0].databaseId // empty')
             [ -n "$id" ] && break
             sleep 10
           done
           [ -n "$id" ] || { echo "::error::No image build started for $TAG (does this repo have a *-dev* tag build workflow?)"; exit 1; }
           gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30 >/dev/null \
             || { echo "::error::Dev image build for $TAG failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"; exit 1; }
-
-      - uses: actions/create-github-app-token@v2
-        id: helm-token
-        if: steps.dev.outputs.key != ''
-        with:
-          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          owner: Cyvore
-          repositories: helm
-
-      - name: Open the dev deploy PR in helm
-        if: steps.dev.outputs.key != ''
-        env:
-          GH_TOKEN: ${{ steps.helm-token.outputs.token }}
-          KEY: ${{ steps.dev.outputs.key }}
-          TAG: ${{ steps.devtag.outputs.tag }}
-          FILE: v3/envs/dev.yaml
-        run: |
-          set -euo pipefail
-          repo="${GITHUB_REPOSITORY#*/}"
-          # The helm Jira check needs a key: take the one on the develop commit being deployed.
-          ticket=$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" "https://api.github.com/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" | jq -r '.commit.message' | grep -oE 'CYVD-[0-9]+' | head -1 || true)
-          ticket="${ticket:-CYVD-3327}"
-
-          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
-          old=$(echo "$cur" | jq -r .content | base64 -d)
-          echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
-          new=$(echo "$old" | sed -E "s|^(  ${KEY}: )\"[^\"]*\"|\1\"${TAG}\"|")
-          prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
-
-          branch="dev-deploy/${repo}-${TAG}"
-          gh api -X POST repos/Cyvore/helm/git/refs -f ref="refs/heads/$branch" \
-            -f sha="$(gh api repos/Cyvore/helm/git/ref/heads/main --jq .object.sha)" --silent
-          gh api -X PUT "repos/Cyvore/helm/contents/$FILE" -f branch="$branch" -f sha="$(echo "$cur" | jq -r .sha)" \
-            -f message="chore(dev): deploy ${repo} ${TAG} (${ticket})" -f content="$(printf '%s\n' "$new" | base64 -w0)" --silent
-          url=$(gh pr create --repo Cyvore/helm --base main --head "$branch" \
-            --title "chore(dev): deploy ${repo} ${TAG} (${ticket})" \
-            --body "Dev deploy from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}, started by @${GITHUB_ACTOR}.
-
-          \`tags.${KEY}\` in \`${FILE}\`: \`${prev}\` → \`${TAG}\`
-
-          Approve + merge, then **Sync the dev app in Argo** (no auto-sync).
-
-          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
-          # Whoever pressed Run workflow gets GitHub's review notification (bell + email) with the link.
-          gh pr edit "$url" --add-reviewer "$GITHUB_ACTOR" >/dev/null \
-            || echo "::warning::Couldn't request a review from @$GITHUB_ACTOR; the link is in this summary."
-          {
-            echo "### Dev build ${TAG} is ready"
-            echo "1. Approve + merge: ${url}"
-            echo "2. Sync the dev app in Argo"
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "::notice::Deploy PR: $url"
+          if [ -z "$KEY" ]; then
+            echo "### Dev image ${TAG} built (not on dev, so no deploy PR)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # One tag for a single-package repo, one per released chart in helm.
       - name: List the tags this run created
@@ -273,6 +227,15 @@ jobs:
             echo "Release title: $title"
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$title"
           done
+
+  dev-deploy:
+    needs: release-please
+    if: needs.release-please.outputs.dev-key != '' && needs.release-please.outputs.dev-tag != ''
+    uses: Cyvore/.github/.github/workflows/dev-deploy-pr.yaml@main
+    with:
+      key: ${{ needs.release-please.outputs.dev-key }}
+      tag: ${{ needs.release-please.outputs.dev-tag }}
+    secrets: inherit
 
   release-notes:
     needs: release-please
