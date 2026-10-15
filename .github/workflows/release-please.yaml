@@ -126,7 +126,7 @@ jobs:
         run: |
           set -euo pipefail
           key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
-          [ -n "$key" ] || { echo "::error::${GITHUB_REPOSITORY#*/} doesn't run on dev (no tag in helm v3/envs/dev.yaml), so there is nothing to deploy. Run from main to release."; exit 1; }
+          [ -n "$key" ] || { echo "::error::${GITHUB_REPOSITORY#*/} doesn't run on dev (no tag in helm v3/envs/dev.yaml), so a dev build has nowhere to deploy. Pick What: release to make a real release, or add the repo to v3/envs/dev.yaml first."; exit 1; }
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Tag the dev build
