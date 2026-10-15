@@ -3,6 +3,16 @@ name: Release Please
 on:
   push:
     branches: [$default-branch]
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "release = Release PR (main only). dev build = tag <version>-dev and open the dev deploy PR."
+        type: choice
+        options: [release, dev build]
+      bump:
+        description: "Version bump (major on 0.x goes to 1.0.0)"
+        type: choice
+        options: [patch, minor, major]
 
 permissions:
   contents: read
@@ -10,4 +20,8 @@ permissions:
 jobs:
   release:
     uses: Cyvore/.github/.github/workflows/release-please.yaml@main
+    with:
+      manual-bump: true
+      what: ${{ inputs.what }}
+      bump: ${{ inputs.bump }}
     secrets: inherit
