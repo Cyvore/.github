@@ -119,7 +119,8 @@ jobs:
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head release-please--branches--main --json url --jq '.[0].url')
           echo "### Release PR for $NEXT: $pr" >> "$GITHUB_STEP_SUMMARY"
 
-      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed has nothing on dev.
+      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed still gets its dev
+      # image built; there's just no deploy PR.
       - name: Check this repo runs on dev
         id: dev
         if: steps.version.outputs.mode == 'dev'
@@ -128,12 +129,12 @@ jobs:
         run: |
           set -euo pipefail
           key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
-          [ -n "$key" ] || { echo "::error::${GITHUB_REPOSITORY#*/} doesn't run on dev (no tag in helm v3/envs/dev.yaml), so a dev build has nowhere to deploy. Pick What: release to make a real release, or add the repo to v3/envs/dev.yaml first."; exit 1; }
+          [ -n "$key" ] || echo "::notice::${GITHUB_REPOSITORY#*/} isn't on dev (no tag in helm v3/envs/dev.yaml): building the dev image only, no deploy PR."
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Tag the dev build
         id: devtag
-        if: steps.dev.outputs.key != ''
+        if: steps.version.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           NEXT: ${{ steps.version.outputs.next }}
@@ -149,10 +150,11 @@ jobs:
           echo "Tagged $tag on ${GITHUB_REF#refs/heads/} @ ${GITHUB_SHA::7}"
 
       - name: Wait for the dev image
-        if: steps.dev.outputs.key != ''
+        if: steps.version.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TAG: ${{ steps.devtag.outputs.tag }}
+          KEY: ${{ steps.dev.outputs.key }}
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
@@ -165,6 +167,9 @@ jobs:
           [ -n "$id" ] || { echo "::error::No image build started for $TAG (does this repo have a *-dev* tag build workflow?)"; exit 1; }
           gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30 >/dev/null \
             || { echo "::error::Dev image build for $TAG failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"; exit 1; }
+          if [ -z "$KEY" ]; then
+            echo "### Dev image ${TAG} built (not on dev, so no deploy PR)" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # One tag for a single-package repo, one per released chart in helm.
       - name: List the tags this run created
@@ -225,7 +230,7 @@ jobs:
 
   dev-deploy:
     needs: release-please
-    if: needs.release-please.outputs.dev-tag != ''
+    if: needs.release-please.outputs.dev-key != '' && needs.release-please.outputs.dev-tag != ''
     uses: Cyvore/.github/.github/workflows/dev-deploy-pr.yaml@main
     with:
       key: ${{ needs.release-please.outputs.dev-key }}
