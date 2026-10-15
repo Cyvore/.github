@@ -20,6 +20,10 @@ on:
         description: patch, minor or major. Set only by a Run workflow dispatch.
         type: string
         default: ""
+      what:
+        description: "release or dev build. Empty = from the branch (main = release, develop = dev build)."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -46,21 +50,31 @@ jobs:
           # Manual repos still tag when their Release PR merges; they just never get one opened for them.
           skip-github-pull-request: ${{ inputs.manual-bump }}
 
-      # Run workflow with a bump: from main a Release PR, from develop a dev build for v3/envs/dev.yaml.
+      # Run workflow with a bump: a Release PR (from main), or a dev build for v3/envs/dev.yaml (from main or develop).
       - name: Work out the version
         id: version
         if: inputs.bump != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BUMP: ${{ inputs.bump }}
+          WHAT: ${{ inputs.what }}
           CONFIG: ${{ inputs.config-file }}
           MANIFEST: ${{ inputs.manifest-file }}
         run: |
           set -euo pipefail
-          case "$GITHUB_REF" in
-            refs/heads/main|refs/heads/develop) ;;
-            *) echo "::error::Run this from main (release) or develop (dev build), not ${GITHUB_REF#refs/heads/}"; exit 1 ;;
+          branch="${GITHUB_REF#refs/heads/}"
+          case "$WHAT" in
+            *dev*) mode=dev ;;
+            release) mode=release ;;
+            *) [ "$branch" = develop ] && mode=dev || mode=release ;;
           esac
+          if [ "$mode" = release ] && [ "$branch" != main ]; then
+            echo "::error::Releases come from main, not $branch. For a dev build pick What: dev build."; exit 1
+          fi
+          if [ "$mode" = dev ] && [ "$branch" != main ] && [ "$branch" != develop ]; then
+            echo "::error::Dev builds come from main or develop, not $branch."; exit 1
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
           read_file() { gh api "repos/$GITHUB_REPOSITORY/contents/$1?ref=main" --jq .content | base64 -d; }
           read_file "$CONFIG" | jq -e '.packages | has(".")' >/dev/null \
@@ -82,7 +96,7 @@ jobs:
           echo "next=$next" >> "$GITHUB_OUTPUT"
 
       - name: Open the Release PR at the chosen version
-        if: inputs.bump != '' && github.ref == 'refs/heads/main'
+        if: steps.version.outputs.mode == 'release'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           CONFIG: ${{ inputs.config-file }}
@@ -106,7 +120,7 @@ jobs:
       # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed has nothing on dev.
       - name: Check this repo runs on dev
         id: dev
-        if: inputs.bump != '' && github.ref == 'refs/heads/develop'
+        if: steps.version.outputs.mode == 'dev'
         env:
           DEV_KEYS: '{"pipeliner": "pipeliner", "manifold": "manifold", "cyvore-agents": "cyvoreAgents", "attendee": "attendee", "attendee-adapter": "attendeeAdapter"}'
         run: |
@@ -130,7 +144,7 @@ jobs:
           # Created as the bot so the tag push fires the repo's existing *-dev* image build.
           gh api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$tag" -f sha="$GITHUB_SHA" --silent
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "Tagged $tag on develop @ ${GITHUB_SHA::7}"
+          echo "Tagged $tag on ${GITHUB_REF#refs/heads/} @ ${GITHUB_SHA::7}"
 
       - name: Wait for the dev image
         if: steps.dev.outputs.key != ''
