@@ -158,9 +158,9 @@ jobs:
         run: |
           set -euo pipefail
           for i in $(seq 1 30); do
-            # Prod builds also fire on every tag; wait for the dev one only.
-            id=$(gh run list --repo "$GITHUB_REPOSITORY" --event push --branch "$TAG" --json databaseId,workflowName,displayTitle \
-              --jq '[.[] | select((.workflowName + " " + .displayTitle) | test("\\bdev\\b"; "i") and (test("prod"; "i") | not))][0].databaseId // empty')
+            # Match the workflow's own name: a run's title is its commit message and can say anything.
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --event push --branch "$TAG" --json databaseId,workflowName \
+              --jq '[.[] | select(.workflowName | test("\\bdev\\b"; "i") and (test("prod"; "i") | not))][0].databaseId // empty')
             [ -n "$id" ] && break
             sleep 10
           done
