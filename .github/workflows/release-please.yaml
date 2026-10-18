@@ -97,6 +97,26 @@ jobs:
           echo "current=$current" >> "$GITHUB_OUTPUT"
           echo "next=$next" >> "$GITHUB_OUTPUT"
 
+          if [ "$mode" = dev ]; then
+            # Dev builds bump from the highest version tagged so far, dev or release:
+            # 0.1.0-dev + patch -> 0.1.1-dev. Nothing tagged yet: the release version above.
+            tags=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/" --paginate --jq '.[].ref' | sed 's|refs/tags/||')
+            devnext=$(printf '%s\n' "$tags" | python3 -c '
+          import re, sys
+          bump, fallback, current = sys.argv[1], sys.argv[2], sys.argv[3]
+          seen = [tuple(map(int, m.groups())) for t in sys.stdin
+                  if (m := re.match(r"^v?(\d+)\.(\d+)\.(\d+)(?:-dev(?:\.\d+)?)?$", t.strip()))]
+          if current != "none":
+              seen.append(tuple(map(int, current.split("-")[0].split("."))))
+          if not seen:
+              print(fallback); sys.exit()
+          a, b, c = max(seen)
+          print({"major": f"{a+1}.0.0", "minor": f"{a}.{b+1}.0", "patch": f"{a}.{b}.{c+1}"}[bump])
+          ' "$BUMP" "$next" "$current")
+            echo "Dev build: $BUMP from the latest tag -> ${devnext}-dev"
+            echo "devnext=$devnext" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Open the Release PR at the chosen version
         if: steps.version.outputs.mode == 'release'
         env:
@@ -137,10 +157,10 @@ jobs:
         if: steps.version.outputs.mode == 'dev'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          NEXT: ${{ steps.version.outputs.next }}
+          NEXT: ${{ steps.version.outputs.devnext }}
         run: |
           set -euo pipefail
-          # 0.2.1-dev, then 0.2.1-dev.2, .3 ... when that version is built for dev again.
+          # Normally new; -dev.2, .3 ... only if that exact dev tag somehow exists already.
           existing=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/${NEXT}-dev" --jq '.[].ref' | sed 's|refs/tags/||')
           tag="${NEXT}-dev"; n=1
           while echo "$existing" | grep -qx "$tag"; do n=$((n+1)); tag="${NEXT}-dev.${n}"; done
