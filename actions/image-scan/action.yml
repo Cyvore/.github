@@ -1,0 +1,91 @@
+name: Image vulnerability scan
+description: >
+  Scans one container image with Trivy and Grype, checks for an end-of-life OS
+  and reports the Node.js version. Writes a summary to the job page and a JSON
+  result for callers that aggregate (e.g. the nightly sweep).
+
+inputs:
+  image:
+    description: Full image reference. The caller must already be able to `docker pull` it.
+    required: true
+  fail-on:
+    description: "never (report only) | critical-high: fail on a fixable critical/high finding or an end-of-life OS"
+    required: false
+    default: never
+
+outputs:
+  result:
+    description: One-line JSON with the counts for this image
+    value: ${{ steps.scan.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        # Pinned by digest: trivy-action tags were hijacked in March 2026.
+        TRIVY: aquasec/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c   # 0.76.1
+        GRYPE: anchore/grype@sha256:6b06708b036f74b2cd70e94b706b4586af96d1932e6ac46255940b2e39dd44a9   # v0.121.1
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/image-scan/$(echo "$IMAGE" | tr '/:@' '___')"
+        mkdir -p "$out"
+
+        # Pull on the host so both scanners read it from the daemon with the caller's registry auth.
+        docker pull -q --platform linux/amd64 "$IMAGE" >/dev/null
+        sock=(-v /var/run/docker.sock:/var/run/docker.sock)
+        docker run --rm "${sock[@]}" "$TRIVY" image --quiet --scanners vuln --format json "$IMAGE" > "$out/trivy.json"
+        docker run --rm "${sock[@]}" "$GRYPE" "docker:$IMAGE" -o json -q > "$out/grype.json"
+
+        # Scanners miss a Node.js copied in from an official node image, so ask the binary itself.
+        node=$(docker run --rm --platform linux/amd64 --entrypoint sh "$IMAGE" -c 'command -v node >/dev/null && node -v || true' 2>/dev/null || true)
+
+        jq -n --slurpfile t "$out/trivy.json" --slurpfile g "$out/grype.json" \
+          --arg image "$IMAGE" --arg node "${node:-none}" '
+          def tv: [$t[0].Results[]?.Vulnerabilities[]?
+                   | select((.Severity == "CRITICAL" or .Severity == "HIGH") and (.FixedVersion // "") != "")
+                   | {id: .VulnerabilityID, sev: .Severity, pkg: .PkgName, ver: .InstalledVersion, fix: .FixedVersion}];
+          def gv: [$g[0].matches[]?
+                   | select((.vulnerability.severity == "Critical" or .vulnerability.severity == "High") and .vulnerability.fix.state == "fixed")
+                   # Grype names library flaws by GHSA id; use the CVE so it matches Trivy.
+                   | {id: ([.relatedVulnerabilities[]?.id | select(startswith("CVE-"))][0] // .vulnerability.id),
+                      sev: (.vulnerability.severity | ascii_upcase), pkg: .artifact.name, ver: .artifact.version, fix: (.vulnerability.fix.versions | join(","))}];
+          (tv | map(.id) | unique) as $ti | (gv | map(.id) | unique) as $gi
+          | {image: $image,
+             findings: ((tv + gv) | unique_by(.id + .pkg) | sort_by(.sev, .id)),
+             total: (($ti + $gi) | unique | length),
+             trivy_only: ($ti - $gi | length),
+             grype_only: ($gi - $ti | length),
+             os: (($t[0].Metadata.OS.Family // "?") + " " + ($t[0].Metadata.OS.Name // "")),
+             eol: ($t[0].Metadata.OS.EOSL // false),
+             node: $node}' > "$out/result.json"
+
+        r="$out/result.json"
+        {
+          echo "### \`$IMAGE\`"
+          echo
+          echo "| Fixable crit+high | Only Trivy | Only Grype | OS | End-of-life OS | Node |"
+          echo "|---|---|---|---|---|---|"
+          jq -r '"| \(.total) | \(.trivy_only) | \(.grype_only) | \(.os) | \(if .eol then "**yes: scanners see no CVEs on it**" else "no" end) | \(.node) |"' "$r"
+          if [ "$(jq '.findings | length' "$r")" -gt 0 ]; then
+            echo
+            echo "<details><summary>Findings</summary>"
+            echo
+            echo "| CVE | Severity | Package | Installed | Fixed in |"
+            echo "|---|---|---|---|---|"
+            jq -r '.findings[:100][] | "| \(.id) | \(.sev) | \(.pkg) | \(.ver) | \(.fix) |"' "$r"
+            echo
+            echo "</details>"
+          fi
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "result=$(jq -c 'del(.findings)' "$r")" >> "$GITHUB_OUTPUT"
+
+        if [ "$FAIL_ON" = "critical-high" ] && jq -e '.total > 0 or .eol' "$r" >/dev/null; then
+          echo "::error::$IMAGE has fixable critical/high vulnerabilities or an end-of-life OS"
+          exit 1
+        fi
