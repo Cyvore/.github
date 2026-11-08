@@ -1,0 +1,25 @@
+name: Trivy
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  trivy:
+    name: trivy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      # fs scan: dependencies and Dockerfile/IaC misconfig. Secrets are gitleaks' job (secret-scan.yaml).
+      # A repo can waive an unfixable finding in its own .trivyignore (read from the working dir).
+      - name: Scan
+        env:
+          # Pinned by digest, same image as actions/image-scan: trivy-action tags were hijacked in March 2026.
+          TRIVY: aquasec/trivy@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c   # 0.76.1
+        run: >-
+          docker run --rm -v "$PWD:/src" -w /src "$TRIVY"
+          fs --scanners vuln,misconfig --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 .
