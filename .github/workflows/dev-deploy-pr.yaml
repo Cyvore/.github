@@ -1,6 +1,6 @@
 name: Dev deploy PR
 
-# Opens a helm PR pointing one image tag in v3/envs/dev.yaml at a freshly built dev image,
+# Opens a helm PR pointing one image tag in envs/dev.yaml at a freshly built dev image,
 # and asks whoever started the run to review it. A person merges, then Syncs in Argo.
 # Called by release-please.yaml (Run workflow from develop) and by repos with their own dev build.
 
@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       key:
-        description: Image tag key under tags in v3/envs/dev.yaml, e.g. pipeliner or attendeeAdapter.
+        description: Image tag key under tags in envs/dev.yaml, e.g. pipeliner or attendeeAdapter.
         type: string
         required: true
       tag:
@@ -43,7 +43,6 @@ jobs:
           SOURCE_TOKEN: ${{ github.token }}
           KEY: ${{ inputs.key }}
           TAG: ${{ inputs.tag }}
-          FILE: v3/envs/dev.yaml
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY#*/}"
@@ -52,7 +51,10 @@ jobs:
             | grep -oE 'CYVD-[0-9]+' | head -1 || true)
           ticket="${ticket:-CYVD-3327}"
 
-          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
+          # envs/dev.yaml since the helm reorg (CYVD-3423); v3/envs/dev.yaml until it merges.
+          FILE=envs/dev.yaml
+          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main" 2>/dev/null) \
+            || { FILE=v3/envs/dev.yaml; cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main"); }
           old=$(echo "$cur" | jq -r .content | base64 -d)
           echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
           prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
