@@ -53,8 +53,11 @@ jobs:
 
           # envs/dev.yaml since the helm reorg (CYVD-3423); v3/envs/dev.yaml until it merges.
           FILE=envs/dev.yaml
-          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main" 2>/dev/null) \
-            || { FILE=v3/envs/dev.yaml; cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main"); }
+          if ! cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main" 2>"$RUNNER_TEMP/err"); then
+            grep -q 'HTTP 404' "$RUNNER_TEMP/err" || { cat "$RUNNER_TEMP/err" >&2; exit 1; }
+            FILE=v3/envs/dev.yaml
+            cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
+          fi
           old=$(echo "$cur" | jq -r .content | base64 -d)
           echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
           prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
