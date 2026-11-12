@@ -52,7 +52,7 @@ jobs:
           # Manual repos still tag when their Release PR merges; they just never get one opened for them.
           skip-github-pull-request: ${{ inputs.manual-bump }}
 
-      # Run workflow with a bump: a Release PR (from main), or a dev build for v3/envs/dev.yaml (from main or develop).
+      # Run workflow with a bump: a Release PR (from main), or a dev build for envs/dev.yaml (from main or develop).
       - name: Work out the version
         id: version
         if: inputs.bump != ''
@@ -139,7 +139,7 @@ jobs:
           pr=$(gh pr list --repo "$GITHUB_REPOSITORY" --head release-please--branches--main --json url --jq '.[0].url')
           echo "### Release PR for $NEXT: $pr" >> "$GITHUB_STEP_SUMMARY"
 
-      # Repo -> its image tag key in helm's v3/envs/dev.yaml. A repo not listed still gets its dev
+      # Repo -> its image tag key in helm's envs/dev.yaml. A repo not listed still gets its dev
       # image built; there's just no deploy PR.
       - name: Check this repo runs on dev
         id: dev
@@ -149,7 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
-          [ -n "$key" ] || echo "::notice::${GITHUB_REPOSITORY#*/} isn't on dev (no tag in helm v3/envs/dev.yaml): building the dev image only, no deploy PR."
+          [ -n "$key" ] || echo "::notice::${GITHUB_REPOSITORY#*/} isn't on dev (no tag in helm envs/dev.yaml): building the dev image only, no deploy PR."
           echo "key=$key" >> "$GITHUB_OUTPUT"
 
       - name: Tag the dev build
