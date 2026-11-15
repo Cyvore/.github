@@ -1,6 +1,6 @@
 name: Dev deploy PR
 
-# Opens a helm PR pointing one image tag in envs/dev.yaml at a freshly built dev image,
+# Opens a helm PR pointing one image tag in deploy/envs/dev.yaml at a freshly built dev image,
 # and asks whoever started the run to review it. A person merges, then Syncs in Argo.
 # Called by release-please.yaml (Run workflow from develop) and by repos with their own dev build.
 
@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       key:
-        description: Image tag key under tags in envs/dev.yaml, e.g. pipeliner or attendeeAdapter.
+        description: Image tag key under tags in deploy/envs/dev.yaml, e.g. pipeliner or attendeeAdapter.
         type: string
         required: true
       tag:
@@ -51,8 +51,8 @@ jobs:
             | grep -oE 'CYVD-[0-9]+' | head -1 || true)
           ticket="${ticket:-CYVD-3327}"
 
-          # envs/dev.yaml since the helm reorg (CYVD-3423); v3/envs/dev.yaml until it merges.
-          FILE=envs/dev.yaml
+          # deploy/envs/dev.yaml since the helm reorg (CYVD-3423); v3/envs/dev.yaml until it merges.
+          FILE=deploy/envs/dev.yaml
           if ! cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main" 2>"$RUNNER_TEMP/err"); then
             grep -q 'HTTP 404' "$RUNNER_TEMP/err" || { cat "$RUNNER_TEMP/err" >&2; exit 1; }
             FILE=v3/envs/dev.yaml
