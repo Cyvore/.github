@@ -145,7 +145,7 @@ jobs:
         id: dev
         if: steps.version.outputs.mode == 'dev'
         env:
-          DEV_KEYS: '{"pipeliner": "pipeliner", "manifold": "manifold", "cyvore-agents": "cyvoreAgents", "attendee": "attendee", "attendee-adapter": "attendeeAdapter"}'
+          DEV_KEYS: '{"pipeliner": "pipeliner", "manifold": "manifold", "cyvore-agents": "cyvoreAgents", "attendee": "attendee", "attendee-adapter": "attendeeAdapter", "cockpit": "cockpit", "cyvore-bots": "cyvoreBots"}'
         run: |
           set -euo pipefail
           key=$(echo "$DEV_KEYS" | jq -r --arg r "${GITHUB_REPOSITORY#*/}" '.[$r] // empty')
