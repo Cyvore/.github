@@ -33,6 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       tags: ${{ steps.tags.outputs.list }}
+      tag-count: ${{ steps.tags.outputs.count }}
       dev-key: ${{ steps.dev.outputs.key }}
       dev-tag: ${{ steps.devtag.outputs.tag }}
     steps:
@@ -202,6 +203,7 @@ jobs:
             | .value | select(. != "")] | unique')
           echo "Released: $list"
           echo "list=$list" >> "$GITHUB_OUTPUT"
+          echo "count=$(echo "$list" | jq length)" >> "$GITHUB_OUTPUT"
 
       # Replaces release-please's "v<version>" name. Falls back to the first feat/fix line,
       # then the bare tag, so a missing key or API error never blocks a release.
@@ -259,11 +261,61 @@ jobs:
 
   release-notes:
     needs: release-please
-    if: needs.release-please.outputs.tags != '[]' && needs.release-please.outputs.tags != ''
-    strategy:
-      matrix:
-        tag: ${{ fromJSON(needs.release-please.outputs.tags) }}
+    if: needs.release-please.outputs.tag-count == '1'
     uses: Cyvore/.github/.github/workflows/publish-release-notes.yaml@main
     with:
-      tag: ${{ matrix.tag }}
+      tag: ${{ fromJSON(needs.release-please.outputs.tags)[0] }}
     secrets: inherit
+
+  # A helm merge can release many charts at once: one Slack message for all of them.
+  release-digest:
+    needs: release-please
+    if: fromJSON(needs.release-please.outputs.tag-count || '0') > 1
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post one Slack digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAGS: ${{ needs.release-please.outputs.tags }}
+          REPO: ${{ github.event.repository.name }}
+          SLACK_RELEASE_WEBHOOK_URL: ${{ secrets.SLACK_RELEASE_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          for TAG in $(echo "$TAGS" | jq -r '.[]'); do
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,name,url,body -q '@json'
+          done > releases.jsonl
+          python3 <<'PYEOF'
+          import json, os, re, urllib.request
+
+          releases = [json.loads(l) for l in open("releases.jsonl")]
+          repo = os.environ["REPO"]
+          blocks = [{"type": "header", "text": {"type": "plain_text", "text": f"{repo} — {len(releases)} releases"}}]
+          # Slack caps a message at 50 blocks.
+          for r in releases[:48]:
+              counts, section = {}, None
+              for line in r["body"].splitlines():
+                  if line.startswith("### "):
+                      section = line[4:].strip()
+                  elif line.startswith("* ") and section in ("Features", "Bug Fixes"):
+                      counts[section] = counts.get(section, 0) + 1
+              f, b = counts.get("Features", 0), counts.get("Bug Fixes", 0)
+              stats = " · ".join(x for x in [
+                  f"{f} feature{'s' if f != 1 else ''}" if f else "",
+                  f"{b} fix{'es' if b != 1 else ''}" if b else ""] if x)
+              title = (r["name"] or "").removeprefix(r["tagName"]).lstrip(" —-")
+              # Titles are cut at 80 chars, often mid ticket list; the link has the tickets.
+              title = re.sub(r"\s*\(CYVD-[^)]*\)?\s*$", "", title)
+              line = f"• <{r['url']}|{r['tagName']}>"
+              if title:
+                  line += f" — {title}"
+              if stats:
+                  line += f"  _{stats}_"
+              blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": line[:2900]}})
+          if len(releases) > 48:
+              blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"+{len(releases) - 48} more on GitHub Releases"}]})
+
+          req = urllib.request.Request(os.environ["SLACK_RELEASE_WEBHOOK_URL"],
+              data=json.dumps({"blocks": blocks}).encode(), headers={"Content-Type": "application/json"})
+          urllib.request.urlopen(req)
+          print(f"Slack digest sent for {len(releases)} releases")
+          PYEOF
