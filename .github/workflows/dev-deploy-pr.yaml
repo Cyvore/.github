@@ -1,7 +1,7 @@
 name: Dev deploy PR
 
-# Opens a helm PR pointing one image tag in v3/envs/dev.yaml at a freshly built dev image,
-# and asks whoever started the run to review it. A person merges, then Syncs in Argo.
+# Points one image tag in v3/envs/dev.yaml at a freshly built dev image. All dev builds go into
+# one open helm PR (label dev-deploy) until someone merges it, then Syncs in Argo.
 # Called by release-please.yaml (Run workflow from develop) and by repos with their own dev build.
 
 on:
@@ -36,7 +36,7 @@ jobs:
           owner: Cyvore
           repositories: helm
 
-      - name: Open the dev deploy PR in helm
+      - name: Add to the open dev deploy PR in helm
         id: pr
         env:
           GH_TOKEN: ${{ steps.helm-token.outputs.token }}
@@ -44,6 +44,7 @@ jobs:
           KEY: ${{ inputs.key }}
           TAG: ${{ inputs.tag }}
           FILE: v3/envs/dev.yaml
+          LABEL: dev-deploy
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY#*/}"
@@ -52,33 +53,57 @@ jobs:
             | grep -oE 'CYVD-[0-9]+' | head -1 || true)
           ticket="${ticket:-CYVD-3327}"
 
-          cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=main")
-          old=$(echo "$cur" | jq -r .content | base64 -d)
-          echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
-          prev=$(echo "$old" | sed -nE "s|^  ${KEY}: \"([^\"]*)\".*|\1|p")
-          new=$(echo "$old" | sed -E "s|^(  ${KEY}: )\"[^\"]*\"|\1\"${TAG}\"|")
+          gh label create "$LABEL" --repo Cyvore/helm --color 0E8A16 --description "Batched dev image bumps" >/dev/null 2>&1 || true
+          open=$(gh pr list --repo Cyvore/helm --label "$LABEL" --state open --json url,headRefName --jq '.[0] // empty')
+          if [ -n "$open" ]; then
+            url=$(echo "$open" | jq -r .url)
+            branch=$(echo "$open" | jq -r .headRefName)
+          else
+            url=""
+            branch="dev-deploy/$(date -u +%Y%m%d-%H%M%S)-${repo}"
+            gh api -X POST repos/Cyvore/helm/git/refs -f ref="refs/heads/$branch" \
+              -f sha="$(gh api repos/Cyvore/helm/git/ref/heads/main --jq .object.sha)" --silent
+          fi
 
-          branch="dev-deploy/${repo}-${TAG}"
-          gh api -X POST repos/Cyvore/helm/git/refs -f ref="refs/heads/$branch" \
-            -f sha="$(gh api repos/Cyvore/helm/git/ref/heads/main --jq .object.sha)" --silent
-          gh api -X PUT "repos/Cyvore/helm/contents/$FILE" -f branch="$branch" -f sha="$(echo "$cur" | jq -r .sha)" \
-            -f message="chore(dev): deploy ${repo} ${TAG} (${ticket})" -f content="$(printf '%s\n' "$new" | base64 -w0)" --silent
-          url=$(gh pr create --repo Cyvore/helm --base main --head "$branch" \
-            --title "chore(dev): deploy ${repo} ${TAG} (${ticket})" \
-            --body "Dev deploy from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}, started by @${GITHUB_ACTOR}.
+          # Builds from different repos can land at once: a stale sha gets a 409, so re-read and retry.
+          for i in 1 2 3 4 5; do
+            cur=$(gh api "repos/Cyvore/helm/contents/$FILE?ref=$branch")
+            old=$(echo "$cur" | jq -r .content | base64 -d)
+            echo "$old" | grep -qE "^  ${KEY}: " || { echo "::error::$FILE has no tags.$KEY"; exit 1; }
+            new=$(echo "$old" | sed -E "s|^(  ${KEY}: )\"[^\"]*\"|\1\"${TAG}\"|")
+            gh api -X PUT "repos/Cyvore/helm/contents/$FILE" -f branch="$branch" -f sha="$(echo "$cur" | jq -r .sha)" \
+              -f message="chore(dev): deploy ${repo} ${TAG} (${ticket})" -f content="$(printf '%s\n' "$new" | base64 -w0)" --silent \
+              && break
+            [ "$i" = 5 ] && { echo "::error::Couldn't update $FILE on $branch"; exit 1; }
+            sleep $((RANDOM % 5 + 2))
+          done
 
-          \`tags.${KEY}\` in \`${FILE}\`: \`${prev}\` → \`${TAG}\`
+          # Title and body list every tag this PR changes vs main.
+          tags_of() { gh api "repos/Cyvore/helm/contents/$FILE?ref=$1" --jq .content | base64 -d \
+            | sed -n '/^tags:/,/^[^ ]/p' | sed -nE 's|^  ([A-Za-z]+): "([^"]*)".*|\1 \2|p'; }
+          changes=$(join <(tags_of main | sort) <(tags_of "$branch" | sort) | awk '$2 != $3')
+          [ -n "$changes" ] || changes="${KEY} - ${TAG}"
+          tickets=$( { [ -n "$url" ] && gh pr view "$url" --repo Cyvore/helm --json title --jq .title; echo "$ticket"; } \
+            | grep -oE 'CYVD-[0-9]+' | sort -u | paste -sd, - | sed 's/,/, /g')
+          title="chore(dev): deploy $(echo "$changes" | awk '{print $1" "$3}' | paste -sd, - | sed 's/,/, /g') (${tickets})"
+          body="Dev deploy: every dev build adds its tag here until this PR is merged.
 
-          Approve + merge, then **Sync the dev app in Argo** (no auto-sync).
+          $(echo "$changes" | awk '{print "- `tags."$1"`: `"$2"` → `"$3"`"}')
 
-          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}")
+          Approve + merge, then **Sync the dev app in Argo** (no auto-sync)."
+
+          if [ -z "$url" ]; then
+            url=$(gh pr create --repo Cyvore/helm --base main --head "$branch" --label "$LABEL" --title "$title" --body "$body")
+          else
+            gh pr edit "$url" --repo Cyvore/helm --title "$title" --body "$body" >/dev/null
+          fi
           # Whoever started the run gets GitHub's review notification (bell + email) with the link.
-          gh pr edit "$url" --add-reviewer "$GITHUB_ACTOR" >/dev/null \
+          gh pr edit "$url" --repo Cyvore/helm --add-reviewer "$GITHUB_ACTOR" >/dev/null \
             || echo "::warning::Couldn't request a review from @$GITHUB_ACTOR; the link is in this summary."
           echo "url=$url" >> "$GITHUB_OUTPUT"
           {
-            echo "### Dev build ${TAG} is ready"
-            echo "1. Approve + merge: ${url}"
+            echo "### Dev build ${TAG} added to ${url}"
+            echo "1. Approve + merge it (other dev builds may be in it too)"
             echo "2. Sync the dev app in Argo"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::notice::Deploy PR: $url"
