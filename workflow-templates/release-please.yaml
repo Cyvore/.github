@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       what:
-        description: "release = Release PR (main only). dev build = tag <version>-dev and open the dev deploy PR."
+        description: "release = tag <version> + prod image (main or develop). dev build = tag <version>-dev + add it to the dev deploy PR."
         type: choice
         options: [release, dev build]
       bump:
