@@ -21,7 +21,7 @@ on:
         type: string
         default: ""
       what:
-        description: "release or dev build, from main or develop. Empty = from the branch (main = release, develop = dev build)."
+        description: "release, dev build, or auto/empty = from the branch (main = release, develop = dev build)."
         type: string
         default: ""
 

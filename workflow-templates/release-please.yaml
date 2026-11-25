@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       what:
-        description: "release = tag <version> + prod image (main or develop). dev build = tag <version>-dev + add it to the dev deploy PR."
+        description: "auto = release on main, dev build on develop. release = tag <version> + prod image. dev build = tag <version>-dev + add it to the dev deploy PR."
         type: choice
-        options: [release, dev build]
+        options: [auto, release, dev build]
       bump:
         description: "Version bump (major on 0.x goes to 1.0.0)"
         type: choice
