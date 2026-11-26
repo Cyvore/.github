@@ -53,12 +53,20 @@ runs:
                    # Grype names library flaws by GHSA id; use the CVE so it matches Trivy.
                    | {id: ([.relatedVulnerabilities[]?.id | select(startswith("CVE-"))][0] // .vulnerability.id),
                       sev: (.vulnerability.severity | ascii_upcase), pkg: .artifact.name, ver: .artifact.version, fix: (.vulnerability.fix.versions | join(","))}];
+          # Customer scanners (Wiz, Inspector) also report criticals with no patch, so count those too.
+          def tc: [$t[0].Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | .VulnerabilityID];
+          def gc: [$g[0].matches[]? | select(.vulnerability.severity == "Critical")
+                   | ([.relatedVulnerabilities[]?.id | select(startswith("CVE-"))][0] // .vulnerability.id)];
           (tv | map(.id) | unique) as $ti | (gv | map(.id) | unique) as $gi
+          | ((tc + gc) | unique) as $crit
+          | ((tv + gv) | map(select(.sev == "CRITICAL") | .id) | unique) as $fixcrit
           | {image: $image,
              findings: ((tv + gv) | unique_by(.id + .pkg) | sort_by(.sev, .id)),
              total: (($ti + $gi) | unique | length),
              trivy_only: ($ti - $gi | length),
              grype_only: ($gi - $ti | length),
+             unfixed_critical: ($crit - $fixcrit | length),
+             critical_ids: $crit,
              os: (($t[0].Metadata.OS.Family // "?") + " " + ($t[0].Metadata.OS.Name // "")),
              eol: ($t[0].Metadata.OS.EOSL // false),
              node: $node}' > "$out/result.json"
@@ -67,9 +75,9 @@ runs:
         {
           echo "### \`$IMAGE\`"
           echo
-          echo "| Fixable crit+high | Only Trivy | Only Grype | OS | End-of-life OS | Node |"
-          echo "|---|---|---|---|---|---|"
-          jq -r '"| \(.total) | \(.trivy_only) | \(.grype_only) | \(.os) | \(if .eol then "**yes: scanners see no CVEs on it**" else "no" end) | \(.node) |"' "$r"
+          echo "| Fixable crit+high | Unfixed critical | Only Trivy | Only Grype | OS | End-of-life OS | Node |"
+          echo "|---|---|---|---|---|---|---|"
+          jq -r '"| \(.total) | \(.unfixed_critical) | \(.trivy_only) | \(.grype_only) | \(.os) | \(if .eol then "**yes: scanners see no CVEs on it**" else "no" end) | \(.node) |"' "$r"
           if [ "$(jq '.findings | length' "$r")" -gt 0 ]; then
             echo
             echo "<details><summary>Findings</summary>"
